@@ -4691,6 +4691,7 @@ proc load_additional_files {} {
 #
 proc fuzzy_subseq_score {q s} {
   set q [string tolower $q]
+  regsub -all { } $q {} q
   set s [string tolower $s]
   set n [string length $q]
   set m [string length $s]
