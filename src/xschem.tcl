@@ -4949,6 +4949,11 @@ proc load_file_dialog {{msg {}} {ext {}} {global_initdir {INITIALINSTDIR}}
     file_dialog_set_colors2
     set file_dialog_retval {   }
   }
+  bind .load.buttons_bot.fzf <FocusIn> {
+    fuzzy_filter_files2 [.load.buttons_bot.fzf get]
+    file_dialog_set_colors2
+    set file_dialog_retval {   }
+  }
 
   button .load.buttons.up -width 5 -text Up -command {load_file_dialog_up  $file_dialog_dir1} -takefocus 0
   label .load.buttons.mkdirlab -text { New dir: }
