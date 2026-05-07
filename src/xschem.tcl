@@ -4689,6 +4689,92 @@ proc load_additional_files {} {
 # confirm_overwrt: ask before overwriting an existing file
 # initialf: fill the file entry box with this name (used when saving)
 #
+proc fuzzy_subseq_score {q s} {
+  set q [string tolower $q]
+  set s [string tolower $s]
+  set n [string length $q]
+  set m [string length $s]
+  if {$n == 0} { return 0 }
+  if {$n > $m} { return -1 }
+  set qi 0
+  set last -2
+  set score 0
+  for {set i 0} {$i < $m && $qi < $n} {incr i} {
+    if {[string index $q $qi] eq [string index $s $i]} {
+      incr score 1
+      if {$i == $last + 1} { incr score 3 }
+      if {$i == 0} {
+        incr score 6
+      } else {
+        if {[regexp {[/_\-. ]} [string index $s [expr {$i-1}]]]} { incr score 4 }
+      }
+      set last $i
+      incr qi
+    }
+  }
+  if {$qi < $n} { return -1 }
+  return [expr {$score * 100 - $last}]
+}
+
+proc fuzzy_match_glob {pat name} {
+  if {[regexp {^(.*)\{([^{}]+)\}(.*)$} $pat -> pre alts post]} {
+    foreach alt [split $alts ","] {
+      if {[string match "${pre}${alt}${post}" $name]} { return 1 }
+    }
+    return 0
+  }
+  return [string match $pat $name]
+}
+
+proc fuzzy_walk {dir maxdepth} {
+  set out {}
+  if {$maxdepth <= 0} { return $out }
+  if {[catch {glob -nocomplain -directory $dir -tails *} entries]} { return $out }
+  foreach e $entries {
+    if {[string index $e 0] eq "."} { continue }
+    set full [file join $dir $e]
+    if {[file isdirectory $full]} {
+      foreach sub [fuzzy_walk $full [expr {$maxdepth - 1}]] {
+        lappend out [file join $e $sub]
+      }
+    } else {
+      lappend out $e
+    }
+  }
+  return $out
+}
+
+proc fuzzy_filter_files2 {q} {
+  global file_dialog_files2 file_dialog_dir1 file_dialog_ext
+  if {$q eq {}} {
+    setglob $file_dialog_dir1
+    return
+  }
+  set all [fuzzy_walk $file_dialog_dir1 6]
+  set ext_pat $file_dialog_ext
+  if {$ext_pat ne {} && $ext_pat ne {*}} {
+    set filt {}
+    foreach f $all {
+      if {[fuzzy_match_glob $ext_pat [file tail $f]]} { lappend filt $f }
+    }
+    set all $filt
+  }
+  set scored {}
+  foreach name $all {
+    set sc [fuzzy_subseq_score $q $name]
+    if {$sc >= 0} { lappend scored [list $sc $name] }
+  }
+  set sorted [lsort -decreasing -integer -index 0 $scored]
+  set out {}
+  set n 0
+  foreach pair $sorted {
+    if {$n >= 500} break
+    lappend out [lindex $pair 1]
+    incr n
+  }
+  set file_dialog_files2 $out
+}
+
 proc load_file_dialog {{msg {}} {ext {}} {global_initdir {INITIALINSTDIR}}
      {loadfile {1}} {confirm_overwrt {1}} {initialf {}}} {
   global file_dialog_index1 file_dialog_files2 file_dialog_files1 file_dialog_retval file_dialog_dir1 pathlist OS
@@ -4853,6 +4939,16 @@ proc load_file_dialog {{msg {}} {ext {}} {global_initdir {INITIALINSTDIR}}
     set file_dialog_retval {   }
   }
 
+  label .load.buttons_bot.fzflab -text { Fuzzy:}
+  entry .load.buttons_bot.fzf -width 18 -highlightcolor red -highlightthickness 2 \
+    -highlightbackground [option get . background {}]
+  entry_replace_selection .load.buttons_bot.fzf
+  bind .load.buttons_bot.fzf <KeyRelease> {
+    fuzzy_filter_files2 [.load.buttons_bot.fzf get]
+    file_dialog_set_colors2
+    set file_dialog_retval {   }
+  }
+
   button .load.buttons.up -width 5 -text Up -command {load_file_dialog_up  $file_dialog_dir1} -takefocus 0
   label .load.buttons.mkdirlab -text { New dir: }
   entry .load.buttons.newdir -width 16 -takefocus 0
@@ -4887,6 +4983,8 @@ proc load_file_dialog {{msg {}} {ext {}} {global_initdir {INITIALINSTDIR}}
   pack .load.buttons.rmdir .load.buttons.mkdir -side right
   pack .load.buttons_bot.srclab -side left
   pack .load.buttons_bot.src -side left
+  pack .load.buttons_bot.fzflab -side left
+  pack .load.buttons_bot.fzf -side left
   pack .load.buttons_bot.label -side left
   pack .load.buttons_bot.entry -side left -fill x -expand true
 
