@@ -6042,6 +6042,9 @@ proc file_chooser {} {
   bind .ins.top3.fzf_e <KeyRelease> {
     fuzzy_chooser_inline [.ins.top3.fzf_e get]
   }
+  bind .ins.top3.fzf_e <FocusIn> {
+    fuzzy_chooser_inline [.ins.top3.fzf_e get]
+  }
 
   button .ins.top4.select_current -takefocus 0 -text {Select current} -command {
     set file_chooser(regex) {}
