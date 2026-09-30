@@ -1,0 +1,141 @@
+# Run with: tclsh tests/fuzzy_search.test
+package require tcltest 2
+namespace import ::tcltest::test
+
+# Load the fuzzy helpers without starting Xschem or Tk.
+set fd [open [file join [file dirname [info script]] .. src xschem.tcl]]
+set definition {}
+while {[gets $fd line] >= 0} {
+  if {$definition eq {} && ![regexp {^proc fuzzy_[^ ]+ } $line]} continue
+  append definition $line \n
+  if {[info complete $definition]} {
+    uplevel #0 $definition
+    set definition {}
+  }
+}
+close $fd
+if {$definition ne {}} {error "Incomplete fuzzy-search procedure"}
+
+test score-1 {fzf path-scheme consecutive and boundary bonuses} -body {
+  list [fuzzy_subseq_score cmos /lib/cmos_inv.sch] \
+       [fuzzy_subseq_score cmos /cmos/unrelated.sch]
+} -result {109 109}
+
+test score-2 {Find the best alignment rather than the first matching letters} -body {
+  expr {
+    [fuzzy_subseq_score cmos /c_a_m_b_o_c_s/cmos_inv.sch] ==
+    [fuzzy_subseq_score cmos /lib/cmos_inv.sch]
+  }
+} -result 1
+
+test score-3 {Gaps lower scores but are allowed} -body {
+  expr {
+    [fuzzy_subseq_score cmos cmos_inv.sch] >
+    [fuzzy_subseq_score cmos c_m_o_s.sch] &&
+    [fuzzy_subseq_score cmos c_m_o_s.sch] >= 0
+  }
+} -result 1
+
+test score-4 {Preserve case-insensitive and space-ignoring queries} -body {
+  list [expr {[fuzzy_subseq_score CMOS /lib/cmos_inv.sch] ==
+              [fuzzy_subseq_score cmos /lib/cmos_inv.sch]}] \
+       [expr {[fuzzy_subseq_score {dirA ibias} dirA/ibias.sch] >= 0}]
+} -result {1 1}
+
+test score-5 {fzf matching does not correct transpositions or substitutions} -body {
+  list [fuzzy_subseq_score cmso cmos_inv.sch] \
+       [fuzzy_subseq_score cmoz cmos_inv.sch] \
+       [fuzzy_subseq_score {} cmos_inv.sch]
+} -result {-1 -1 0}
+
+test ranking-1 {Filename matches precede directory and scattered full-path matches} -body {
+  fuzzy_rank_files cmos {
+    /cmos/unrelated.sch
+    /home/schippes/share/doc/xschem/ngspice/or_ngspice.sch
+    /library/cmos_inv.sch
+    /library/cmos_inv.sym
+  }
+} -result {/library/cmos_inv.sch /library/cmos_inv.sym /cmos/unrelated.sch /home/schippes/share/doc/xschem/ngspice/or_ngspice.sch}
+
+test paths-1 {Directory-qualified searches retain both library and subdirectory names} -body {
+  set found {}
+  foreach q {{dirA ibias} dirA/ibias {dirB ibias} dirB/ibias} {
+    lappend found [lindex [fuzzy_rank_files $q {
+      /dirA/ibias.sch /dirB/ibias.sch
+    }] 0]
+  }
+  set found
+} -result {/dirA/ibias.sch /dirA/ibias.sch /dirB/ibias.sch /dirB/ibias.sch}
+
+test ranking-2 {Within each match group, ties use path length then input order} -body {
+  fuzzy_rank_files cmos {/long/cmos.sym /lib/cmos.sym /lib/cmos.sch /a/cmos/x.sch}
+} -result {/lib/cmos.sym /lib/cmos.sch /long/cmos.sym /a/cmos/x.sch}
+
+test ranking-3 {Results remain capped at 500} -body {
+  set files {}
+  for {set i 0} {$i < 510} {incr i} {lappend files /lib/cmos_$i.sch}
+  llength [fuzzy_rank_files cmos $files]
+} -result 500
+
+test ranking-4 {Filename priority is stronger than a score tie-break} -body {
+  fuzzy_rank_files cmos {/cmos/unrelated.sch /lib/c_m_o_s.sch /lib/cmos_inv.sch}
+} -result {/lib/cmos_inv.sch /lib/c_m_o_s.sch /cmos/unrelated.sch}
+
+test ranking-5 {Irrelevant directory prefixes do not change filename scores} -body {
+  fuzzy_rank_files cmos {/c_a_m_b_o_c_s/cmos_inv.sch /lib/cmos_inv.sch}
+} -result {/lib/cmos_inv.sch /c_a_m_b_o_c_s/cmos_inv.sch}
+
+rename fuzzy_walk real_fuzzy_walk
+proc fuzzy_walk {dir depth} {return $::candidates}
+proc match_file {pattern paths depth fullpath} {return $::candidates}
+proc setglob {dir} {set ::restored $dir}
+proc file_chooser_dirlist {} {set ::restored chooser}
+proc .ins.center.leftdir.l {args} {lappend ::widget_calls $args}
+
+set file_dialog_dir1 /lib
+set file_dialog_ext *.sch
+set new_file_browser_depth 3
+set new_file_browser_ext {\.(sch|sym)$}
+set pathlist {/lib /cmos}
+set dark_gui_colorscheme 0
+set widget_calls {}
+set candidates {/cmos/unrelated.sch /lib/cmos_inv.sym /lib/cmos_inv.sch /lib/cmos.txt}
+
+test old-browser-1 {Old browser preserves its extension filter and ranks files} -body {
+  fuzzy_filter_files2 cmos
+  set file_dialog_files2
+} -result {/lib/cmos_inv.sch /cmos/unrelated.sch}
+
+test new-browser-1 {New browser retains full paths for opening and ranks files} -body {
+  fuzzy_chooser_inline cmos
+  list $file_chooser(files) $file_chooser(fullpathlist) \
+       $file_chooser(dirs) $file_chooser(nitems)
+} -result [list {/lib/cmos_inv.sym /lib/cmos_inv.sch /cmos/unrelated.sch} \
+                {/lib/cmos_inv.sym /lib/cmos_inv.sch /cmos/unrelated.sch} {/lib /cmos} 3]
+
+test new-browser-alias-1 {Ranking preserves upstream's library aliases} -setup {
+  set saved_paths $pathlist
+  set saved_candidates $candidates
+  set pathlist {/project/lib /project/cmos}
+  set candidates {/project/cmos/unrelated.sch /project/lib/cmos_inv.sch}
+  set lib_alias(/project/lib) analog
+} -body {
+  fuzzy_chooser_inline cmos
+  set file_chooser(dirtails)
+} -cleanup {
+  unset lib_alias(/project/lib)
+  set pathlist $saved_paths
+  set candidates $saved_candidates
+} -result {analog cmos}
+
+test browsers-clear-1 {Empty queries restore normal browsing} -body {
+  fuzzy_filter_files2 {}
+  set old_restored $restored
+  fuzzy_chooser_inline {}
+  list $old_restored $restored $file_chooser(files) \
+       $file_chooser(fullpathlist) $file_chooser(nitems)
+} -result {/lib chooser {} {} 0}
+
+set failed $::tcltest::numTests(Failed)
+::tcltest::cleanupTests
+if {$failed} {exit 1}

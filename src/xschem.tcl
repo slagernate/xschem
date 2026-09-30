@@ -4802,32 +4802,138 @@ proc load_additional_files {} {
   }
 }
 
+# Scoring follows fzf V2's path scheme: match 16, gap -3/-1,
+# boundary 8/9, camel-case 7, consecutive >=4, first-character bonus x2.
+# https://github.com/junegunn/fzf/blob/v0.65.2/src/algo/algo.go
 proc fuzzy_subseq_score {q s} {
   set q [string tolower $q]
   regsub -all { } $q {} q
-  set s [string tolower $s]
+  set text [string tolower $s]
   set n [string length $q]
-  set m [string length $s]
   if {$n == 0} { return 0 }
-  if {$n > $m} { return -1 }
-  set qi 0
-  set last -2
+  set first {}
+  set pos -1
+  foreach char [split $q {}] {
+    set pos [string first $char $text [expr {$pos + 1}]]
+    if {$pos < 0} { return -1 }
+    lappend first $pos
+  }
+  set last [string last [string index $q end] $text]
+  set bonuses {}
+  set prevclass 2
+  foreach char [split [string range $s 0 $last] {}] {
+    if {$char eq "/" || ($::tcl_platform(platform) eq "windows" && $char eq "\\")} {
+      set class 2
+    } elseif {[string is space $char]} {
+      set class 0
+    } elseif {[string is lower $char]} {
+      set class 3
+    } elseif {[string is upper $char]} {
+      set class 4
+    } elseif {[string is alpha $char]} {
+      set class 5
+    } elseif {[string is digit $char]} {
+      set class 6
+    } else {
+      set class 1
+    }
+    set bonus 0
+    if {$class >= 1 && $prevclass <= 2} {
+      set bonus [expr {$prevclass == 2 ? 9 : 8}]
+    } elseif {($prevclass == 3 && $class == 4) || ($prevclass != 6 && $class == 6)} {
+      set bonus 7
+    } elseif {$class <= 2} {
+      set bonus 8
+    }
+    lappend bonuses $bonus
+    set prevclass $class
+  }
+
+  set previous_scores {}
+  set previous_runs {}
   set score 0
-  for {set i 0} {$i < $m && $qi < $n} {incr i} {
-    if {[string index $q $qi] eq [string index $s $i]} {
-      incr score 1
-      if {$i == $last + 1} { incr score 3 }
-      if {$i == 0} {
-        incr score 6
-      } else {
-        if {[regexp {[/_\-. ]} [string index $s [expr {$i-1}]]]} { incr score 4 }
-      }
-      set last $i
-      incr qi
+  set gap 0
+  set best -1
+  for {set j 0} {$j <= $last} {incr j} {
+    set run 0
+    if {[string index $text $j] eq [string index $q 0]} {
+      set score [expr {16 + 2 * [lindex $bonuses $j]}]
+      set run 1
+      set gap 0
+    } else {
+      set score [expr {max(0, $score - ($gap ? 1 : 3))}]
+      set gap 1
+    }
+    lappend previous_scores $score
+    lappend previous_runs $run
+    if {$n == 1 && $score >= $best} {
+      set best $score
     }
   }
-  if {$qi < $n} { return -1 }
-  return [expr {$score * 100 - $last}]
+  if {$n == 1} { return $best }
+  for {set i 1} {$i < $n} {incr i} {
+    set first_pos [lindex $first $i]
+    set scores [lrepeat $first_pos 0]
+    set runs [lrepeat $first_pos 0]
+    set left 0
+    set gap 0
+    for {set j $first_pos} {$j <= $last} {incr j} {
+      set skip [expr {$left - ($gap ? 1 : 3)}]
+      set matched 0
+      set run 0
+      if {[string index $text $j] eq [string index $q $i]} {
+        set diagonal [expr {$j - 1}]
+        set matched [expr {[lindex $previous_scores $diagonal] + 16}]
+        set bonus [lindex $bonuses $j]
+        set run [expr {[lindex $previous_runs $diagonal] + 1}]
+        if {$run > 1} {
+          set first_bonus [lindex $bonuses [expr {$j - $run + 1}]]
+          if {$bonus >= 8 && $bonus > $first_bonus} {
+            set run 1
+          } else {
+            set bonus [expr {max($bonus, 4, $first_bonus)}]
+          }
+        }
+        if {$matched + $bonus < $skip} {
+          incr matched [lindex $bonuses $j]
+          set run 0
+        } else {
+          incr matched $bonus
+        }
+      }
+      set gap [expr {$matched < $skip}]
+      set score [expr {max(0, $matched, $skip)}]
+      lappend scores $score
+      lappend runs $run
+      set left $score
+      if {$i == $n - 1 && $score >= $best} {
+        set best $score
+      }
+    }
+    set previous_scores $scores
+    set previous_runs $runs
+  }
+  return $best
+}
+
+proc fuzzy_rank_files {q files} {
+  set ranked {}
+  foreach f $files {
+    set score [fuzzy_subseq_score $q [file tail $f]]
+    set filename_match [expr {$score >= 0}]
+    if {!$filename_match} { set score [fuzzy_subseq_score $q $f] }
+    if {$score < 0} continue
+    lappend ranked [list $filename_match $score [string length $f] $f]
+  }
+  # Stable sorts: filename matches first, then score, length, and input order.
+  set ranked [lsort -integer -index 2 $ranked]
+  set ranked [lsort -decreasing -integer -index 1 $ranked]
+  set ranked [lsort -decreasing -integer -index 0 $ranked]
+  set result {}
+  foreach item [lrange $ranked 0 499] {
+    lappend result [lindex $item 3]
+  }
+  return $result
 }
 
 proc fuzzy_match_glob {pat name} {
@@ -4873,20 +4979,7 @@ proc fuzzy_filter_files2 {q} {
     }
     set all $filt
   }
-  set scored {}
-  foreach name $all {
-    set sc [fuzzy_subseq_score $q $name]
-    if {$sc >= 0} { lappend scored [list $sc $name] }
-  }
-  set sorted [lsort -decreasing -integer -index 0 $scored]
-  set out {}
-  set n 0
-  foreach pair $sorted {
-    if {$n >= 500} break
-    lappend out [lindex $pair 1]
-    incr n
-  }
-  set file_dialog_files2 $out
+  set file_dialog_files2 [fuzzy_rank_files $q $all]
 }
 
 # global_initdir: name of global variable containing the initial directory
@@ -5826,24 +5919,16 @@ proc fuzzy_chooser_inline {q} {
   set nfbe $new_file_browser_ext
   if {[catch {regexp $nfbe {12345}}]} { set nfbe {} }
   set allfiles [match_file {} {} $new_file_browser_depth 1]
-  set scored {}
+  set files {}
   foreach f $allfiles {
     if {$nfbe ne {}} {
       set ok 0
       catch {set ok [regexp $nfbe $f]}
       if {!$ok} continue
     }
-    set sc [fuzzy_subseq_score $q $f]
-    if {$sc >= 0} { lappend scored [list $sc $f] }
+    lappend files $f
   }
-  set sorted [lsort -decreasing -integer -index 0 $scored]
-  set hits {}
-  set n 0
-  foreach pair $sorted {
-    if {$n >= 500} break
-    lappend hits [lindex $pair 1]
-    incr n
-  }
+  set hits [fuzzy_rank_files $q $files]
   set seen_dir [dict create]
   set new_dirs {}
   foreach f $hits {
